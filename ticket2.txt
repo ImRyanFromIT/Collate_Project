@@ -1,0 +1,3 @@
+CLOUD-LNX-DOCK01 is not responding to ping
+System appears to be frozen
+IDMGT-LNX-LDAP01 also showing similar symptoms 

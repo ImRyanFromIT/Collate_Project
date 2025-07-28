@@ -78,8 +78,5 @@ Edit `config.json` to customize:
 - **Google Sheets**: Sheet IDs and credentials file
 - **Caching**: Enable/disable and TTL settings
 
-##  Learn More
-
-Run `python example_usage.py` to see detailed examples of all functionality.
 
 ---

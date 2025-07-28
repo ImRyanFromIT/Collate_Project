@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to config.json and replace the placeholder values with your actual credentials. See SETUP.md for detailed instructions.",
+  "google_sheets": {
+    "support_group_sheet_id": "1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "app_owners_sheet_id": "1YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+    "credentials_file": "path/to/your/service-account-credentials.json"
+  },
+  "openai": {
+    "api_key": "sk-proj-YOUR_OPENAI_API_KEY_HERE",
+    "model": "gpt-3.5-turbo",
+    "temperature": 0.1
+  },
+  "cache": {
+    "enabled": true,
+    "ttl_seconds": 3600
+  }
+} 

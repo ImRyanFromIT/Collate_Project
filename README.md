@@ -83,4 +83,3 @@ Edit `config.json` to customize:
 Run `python example_usage.py` to see detailed examples of all functionality.
 
 ---
-*For questions or issues, check the example usage file or review the inline documentation.*

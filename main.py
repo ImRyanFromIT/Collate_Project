@@ -1,481 +1,394 @@
+#!/usr/bin/env python3
+"""
+Simplified Ticket Processing System
+Focuses on: Hostname extraction and App Owner lookup
+"""
+
 import openai
 import json
 import sys
 import os
 import gspread
 from google.oauth2.service_account import Credentials
+from functools import lru_cache
+from datetime import datetime, timedelta
+import argparse
 import glob
 
+# Load configuration
+def load_config():
+    """Load configuration from config.json"""
+    with open('config.json', 'r') as f:
+        return json.load(f)
+
+CONFIG = load_config()
+
+# Simple cache implementation
+class SimpleCache:
+    def __init__(self, ttl_seconds=3600):
+        self._cache = {}
+        self._ttl = timedelta(seconds=ttl_seconds)
+    
+    def get(self, key):
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if datetime.now() - timestamp < self._ttl:
+                return value
+            else:
+                del self._cache[key]
+        return None
+    
+    def set(self, key, value):
+        self._cache[key] = (value, datetime.now())
+    
+    def clear(self):
+        self._cache.clear()
+
+# Initialize cache
+cache = SimpleCache(ttl_seconds=CONFIG['cache']['ttl_seconds'])
+
 def parse_ticket(ticket_text):
-    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    """
+    Extract hostnames from ticket text using OpenAI.
+    Returns a simple list of hostnames found.
+    """
+    client = openai.OpenAI(api_key=CONFIG['openai']['api_key'])
     
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model=CONFIG['openai']['model'],
         messages=[
-            {"role": "system", "content": """Extract ALL hostnames and their specific issue types from the ticket. 
-            Required format:
-                {
-                    "hosts": [
-                        {
-                            "hostname": "string",
-                            "confidence": "high|medium|low",
-                            "context": "why this was identified"
-                            "context explanation": "why confidence is high|medium|low"
-                        }
-                    ],
-                    "issue_type": "reboot|maintenance",
-                    "ambiguities": ["list any unclear aspects"]
-                }
+            {"role": "system", "content": """Extract ALL hostnames from the ticket text.
+            Return a simple JSON list of hostnames found.
             
-            Hostname examples:
-            - web01.company.com
-            - db-prod-01
-            - app-server-03.internal
-            - mail.example.org
-            - hostname starts with 'x' and is 8 characters long
-            - xoabbypr 
+            Hostname patterns to look for:
+            - Server names (e.g., WEB01, DB-PROD-01, APP-SERVER-03)
+            - Fully qualified domain names (e.g., server.company.com)
+            - Any identifier that represents a specific machine/server
             
-            Look for server names, computer names, domain names, or any identifier that represents a specific machine/server.
+            Return format: {"hostnames": ["hostname1", "hostname2", ...]}
             
-            Issue types:
-            - "reboot" for restart, reboot, not restarted, unresponsive, hung, frozen
-            - "maintenance" for failed updates, patches, maintenance issues, updates
-            - If you are not confident, mark as "unsure"
-            
-            Each hostname should be paired with its specific issue based on the context in the ticket."""},
+            If no hostnames found, return: {"hostnames": []}"""},
             {"role": "user", "content": ticket_text}
         ],
-        temperature=0.1
+        temperature=CONFIG['openai']['temperature']
     )
     
     content = response.choices[0].message.content
     if content is None:
-        return {"error": "No content received from API"}
-    return json.loads(content)
-
-def get_support_group(hostname):
-    """
-    Query Google Sheet to find support group for a given hostname. Explicit search
+        return {"hostnames": [], "error": "No content received from API"}
     
-    Args:
-        hostname (str): The hostname to look up
-        
-    Returns:
-        dict: {
-            "hostname": str,
-            "support_group": str or None,
-            "found": bool
-        }
-    """
     try:
-        # Handles google sheet direction and auth. Needs local json file from gcp
-        scope = ['https://spreadsheets.google.com/feeds',
-                'https://www.googleapis.com/auth/drive']
-        
-        creds = Credentials.from_service_account_file('linux-project-464606-a2b6ecdaa8b5.json', scopes=scope)
-        client = gspread.authorize(creds)
-        
-        sheet_id = '1A-3r8ybBk45hyFnGRpzItY4rtRMfrjCx9PKVFeysMGc'
-        sheet = client.open_by_key(sheet_id)
+        result = json.loads(content)
+        return {"hostnames": result.get("hostnames", [])}
+    except json.JSONDecodeError:
+        return {"hostnames": [], "error": "Failed to parse AI response"}
+
+@lru_cache(maxsize=1)
+def get_google_sheets_client():
+    """Get authenticated Google Sheets client (cached)"""
+    scope = ['https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive']
+    
+    creds = Credentials.from_service_account_file(
+        CONFIG['google_sheets']['credentials_file'], 
+        scopes=scope
+    )
+    return gspread.authorize(creds)
+
+def get_support_group(hostname, use_cache=True):
+    """
+    Find support group for a hostname.
+    Returns: {"hostname": str, "support_group": str|None, "found": bool}
+    """
+    # Check cache first
+    if use_cache and CONFIG['cache']['enabled']:
+        cached_result = cache.get(f"support_group:{hostname}")
+        if cached_result is not None:
+            return cached_result
+    
+    try:
+        client = get_google_sheets_client()
+        sheet = client.open_by_key(CONFIG['google_sheets']['support_group_sheet_id'])
         worksheet = sheet.worksheet('Sheet1')
         
-        # Gets ALL values in sheet, needs to be cleaned up
+        # Get all values (consider using batch_get for better performance)
         all_values = worksheet.get_all_values()
         
-        # Skip headers, select columns 'A' and 'C', needs to be cleaned up
-        for row in all_values[1:]:  # SKIP HEADER!!
+        # Search for hostname (Column C, index 2)
+        for row in all_values[1:]:  # Skip header
             if len(row) > 2 and row[2].strip().upper() == hostname.strip().upper():
-                support_group = row[0] if len(row) > 0 else None  # Column A (index 0)
-                return {
+                result = {
                     "hostname": hostname,
-                    "support_group": support_group,
+                    "support_group": row[0] if len(row) > 0 else None,
                     "found": True
                 }
+                
+                # Cache the result
+                if CONFIG['cache']['enabled']:
+                    cache.set(f"support_group:{hostname}", result)
+                
+                return result
         
-        # Hostname not found
-        return {
-            "hostname": hostname,
-            "support_group": None,
-            "found": False
-        }
+        # Not found
+        result = {"hostname": hostname, "support_group": None, "found": False}
+        if CONFIG['cache']['enabled']:
+            cache.set(f"support_group:{hostname}", result)
+        return result
         
     except Exception as e:
-        return {
-            "hostname": hostname,
-            "support_group": None,
-            "found": False,
-            "error": str(e)
-        }
+        return {"hostname": hostname, "support_group": None, "found": False, "error": str(e)}
 
-def get_app_owners(support_group):
+def get_app_owners(support_group, use_cache=True):
     """
-    Query second Google Sheet to find app owners and contacts for a given support group.
+    Find app owners for a support group.
+    Returns: {"support_group": str, "contacts": {...}, "found": bool}
+    """
+    # Check cache first
+    if use_cache and CONFIG['cache']['enabled']:
+        cached_result = cache.get(f"app_owners:{support_group}")
+        if cached_result is not None:
+            return cached_result
     
-    Args:
-        support_group (str): The support group name to look up
-        
-    Returns:
-        dict: {
-            "support_group": str,
-            "app_owners": str or None,
-            "email_distros": str or None,
-            "individual_contacts": str or None,
-            "found": bool
-        }
-    """
     try:
-        # Set up credentials and authorize
-        scope = ['https://spreadsheets.google.com/feeds',
-                'https://www.googleapis.com/auth/drive']
-        
-        creds = Credentials.from_service_account_file('linux-project-464606-a2b6ecdaa8b5.json', scopes=scope)
-        client = gspread.authorize(creds)
-        
-        # Open the second Google Sheet
-        sheet_id = '1X5Cj4xlL0iW4S9QgH4v58TRSiP9voBDZxBMiboWPmEk'
-        sheet = client.open_by_key(sheet_id)
+        client = get_google_sheets_client()
+        sheet = client.open_by_key(CONFIG['google_sheets']['app_owners_sheet_id'])
         worksheet = sheet.worksheet('Sheet1')
         
-        # Get all values from the sheet
         all_values = worksheet.get_all_values()
         
-        # Skip header row and search for support group in Column A (index 0)
+        # Search for support group (Column A, index 0)
         for row in all_values[1:]:  # Skip header
             if len(row) > 0 and row[0].strip().upper() == support_group.strip().upper():
-                app_owners = row[0] if len(row) > 0 else None  # Column A (index 0)
-                email_distros = row[1] if len(row) > 1 else None  # Column B (index 1)
-                individual_contacts = row[2] if len(row) > 2 else None  # Column C (index 2)
-                
-                return {
+                result = {
                     "support_group": support_group,
-                    "app_owners": app_owners,
-                    "email_distros": email_distros,
-                    "individual_contacts": individual_contacts,
+                    "contacts": {
+                        "app_owner": row[0] if len(row) > 0 else None,
+                        "email_distros": row[1] if len(row) > 1 else None,
+                        "individual_contacts": row[2] if len(row) > 2 else None
+                    },
                     "found": True
                 }
+                
+                # Cache the result
+                if CONFIG['cache']['enabled']:
+                    cache.set(f"app_owners:{support_group}", result)
+                
+                return result
         
-        # Support group not found in app owners sheet
-        return {
-            "support_group": support_group,
-            "app_owners": None,
-            "email_distros": None,
-            "individual_contacts": None,
-            "found": False,
-            "message": f"Support group '{support_group}' not found in app owners sheet"
-        }
+        # Not found
+        result = {"support_group": support_group, "contacts": {}, "found": False}
+        if CONFIG['cache']['enabled']:
+            cache.set(f"app_owners:{support_group}", result)
+        return result
         
     except Exception as e:
-        return {
-            "support_group": support_group,
-            "app_owners": None,
-            "email_distros": None,
-            "individual_contacts": None,
-            "found": False,
-            "error": str(e)
-        }
+        return {"support_group": support_group, "contacts": {}, "found": False, "error": str(e)}
 
-def collate_ticket_results(ticket_content):
+def process_ticket(ticket_content):
     """
-    Process a ticket and collate results grouped by support group.
-    
-    Args:
-        ticket_content (str): The raw ticket text
-        
-    Returns:
-        dict: {
-            "summary": {
-                "total_hostnames": int,
-                "total_support_groups": int,
-                "successful_lookups": int,
-                "failed_lookups": int
-            },
-            "groups": {
-                "Support Group Name": {
-                    "support_group": str,
-                    "hostnames": [str],
-                    "email_distros": str,
-                    "individual_contacts": str,
-                    "issue_types": [str],
-                    "hostname_details": {...}
-                }
-            },
-            "errors": {
-                "hostnames_not_found": [str],
-                "support_groups_not_found": [str],
-                "other_errors": [str]
-            }
-        }
+    Main processing function: parse ticket and collate results by support group.
     """
-    # Step 1: Parse the ticket to get hostnames
-    parsed_result = parse_ticket(ticket_content)
+    # Step 1: Parse ticket
+    parse_result = parse_ticket(ticket_content)
     
-    if 'error' in parsed_result:
+    if 'error' in parse_result:
         return {
-            "summary": {"total_hostnames": 0, "total_support_groups": 0, "successful_lookups": 0, "failed_lookups": 0},
-            "groups": {},
-            "errors": {"hostnames_not_found": [], "support_groups_not_found": [], "other_errors": [f"Ticket parsing failed: {parsed_result['error']}"]}
+            "status": "error",
+            "message": f"Failed to parse ticket: {parse_result['error']}",
+            "results": {}
         }
     
-    if 'hosts' not in parsed_result or not parsed_result['hosts']:
+    hostnames = parse_result.get('hostnames', [])
+    
+    if not hostnames:
         return {
-            "summary": {"total_hostnames": 0, "total_support_groups": 0, "successful_lookups": 0, "failed_lookups": 0},
-            "groups": {},
-            "errors": {"hostnames_not_found": [], "support_groups_not_found": [], "other_errors": ["No hostnames found in ticket"]}
+            "status": "success",
+            "message": "No hostnames found in ticket",
+            "results": {}
         }
     
-    # Initialize tracking variables
+    # Step 2: Process hostnames and group by support group
     groups = {}
-    errors = {"hostnames_not_found": [], "support_groups_not_found": [], "other_errors": []}
-    issue_type = parsed_result.get('issue_type', 'unknown')
+    not_found = []
     
-    # Step 2: Process each hostname
-    for host in parsed_result['hosts']:
-        hostname = host.get('hostname', '') if isinstance(host, dict) else str(host)
-        if not hostname:
-            continue
-            
-        # Get support group for hostname
+    for hostname in hostnames:
+        # Get support group
         support_info = get_support_group(hostname)
         
-        if not support_info.get('found'):
-            errors["hostnames_not_found"].append(hostname)
-            if 'error' in support_info:
-                errors["other_errors"].append(f"Error looking up {hostname}: {support_info['error']}")
+        if not support_info['found']:
+            not_found.append(hostname)
             continue
         
         support_group = support_info['support_group']
         
-        # Get app owners for support group
-        app_owner_info = get_app_owners(support_group)
+        # Get app owners
+        owner_info = get_app_owners(support_group)
         
-        if not app_owner_info.get('found'):
-            errors["support_groups_not_found"].append(support_group)
-            if 'error' in app_owner_info:
-                errors["other_errors"].append(f"Error looking up app owners for {support_group}: {app_owner_info['error']}")
-        
-        # Group by support group
+        # Group results
         if support_group not in groups:
             groups[support_group] = {
-                "support_group": support_group,
                 "hostnames": [],
-                "email_distros": app_owner_info.get('email_distros'),
-                "individual_contacts": app_owner_info.get('individual_contacts'),
-                "issue_types": [],
-                "hostname_details": {}
+                "contacts": owner_info.get('contacts', {}) if owner_info['found'] else {},
+                "contact_lookup_successful": owner_info['found']
             }
         
-        # Add hostname to group
         groups[support_group]["hostnames"].append(hostname)
-        
-        # Add issue type if not already present
-        if issue_type not in groups[support_group]["issue_types"]:
-            groups[support_group]["issue_types"].append(issue_type)
-        
-        # Store detailed hostname info
-        groups[support_group]["hostname_details"][hostname] = {
-            "hostname": hostname,
-            "confidence": host.get('confidence', 'unknown') if isinstance(host, dict) else 'unknown',
-            "context": host.get('context', '') if isinstance(host, dict) else '',
-            "support_group_found": support_info.get('found', False),
-            "app_owners_found": app_owner_info.get('found', False)
-        }
     
-    # Step 3: Generate summary
-    total_hostnames = len(parsed_result['hosts'])
-    successful_lookups = sum(len(group["hostnames"]) for group in groups.values())
-    failed_lookups = len(errors["hostnames_not_found"])
-    
-    summary = {
-        "total_hostnames": total_hostnames,
-        "total_support_groups": len(groups),
-        "successful_lookups": successful_lookups,
-        "failed_lookups": failed_lookups,
-        "coverage_percentage": int(round((successful_lookups / total_hostnames * 100) if total_hostnames > 0 else 0))
-    }
-    
+    # Step 3: Create summary
     return {
-        "summary": summary,
-        "groups": groups,
-        "errors": errors
+        "status": "success",
+        "summary": {
+            "total_hostnames": len(hostnames),
+            "grouped_into": len(groups),
+            "not_found": len(not_found)
+        },
+        "results": groups,
+        "errors": {
+            "hostnames_not_found": not_found
+        }
     }
 
-# command switches for debugging purposes
-if len(sys.argv) > 2 and sys.argv[1] == "--ticket":
-    with open(sys.argv[2], 'r') as f:
-        ticket_content = f.read()
+def format_results(results):
+    """Format results for display"""
+    output = []
     
-    print(f"Ticket: {ticket_content.strip()}\n")
-    result = parse_ticket(ticket_content)
-    print(json.dumps(result, indent=2))
-elif len(sys.argv) > 2 and sys.argv[1] == "--lookup":
-    hostname = sys.argv[2]
-    print(f"Looking up hostname: {hostname}\n")
-    result = get_support_group(hostname)
-    print(json.dumps(result, indent=2))
-elif len(sys.argv) > 2 and sys.argv[1] == "--app-owners":
-    support_group = sys.argv[2]
-    print(f"Looking up app owners for support group: {support_group}\n")
-    result = get_app_owners(support_group)
-    print(json.dumps(result, indent=2))
-elif len(sys.argv) > 2 and sys.argv[1] == "--combined":
-    with open(sys.argv[2], 'r') as f:
-        ticket_content = f.read()
+    output.append("\n=== TICKET PROCESSING RESULTS ===\n")
     
-    print(f"Ticket: {ticket_content.strip()}\n")
+    # Summary
+    if 'summary' in results:
+        output.append(f"Total Hostnames: {results['summary']['total_hostnames']}")
+        output.append(f"Support Groups: {results['summary']['grouped_into']}")
+        output.append(f"Not Found: {results['summary']['not_found']}\n")
     
-    # Parse the ticket first
-    parsed_result = parse_ticket(ticket_content)
-    print("Parsed ticket:")
-    print(json.dumps(parsed_result, indent=2))
-    
-    # Look up support groups and app owners for each hostname found
-    if 'hosts' in parsed_result:
-        print("\nComplete lookup chain:")
-        for host in parsed_result['hosts']:
-            hostname = host.get('hostname', '') if isinstance(host, dict) else str(host)
-            if hostname:
-                print(f"\n--- {hostname} ---")
-                
-                # Step 1: Get support group
-                support_info = get_support_group(hostname)
-                print(f"Support Group: {json.dumps(support_info, indent=2)}")
-                
-                # Step 2: Get app owners (if support group was found)
-                if support_info.get('found') and support_info.get('support_group'):
-                    app_owner_info = get_app_owners(support_info['support_group'])
-                    print(f"App Owners: {json.dumps(app_owner_info, indent=2)}")
-                else:
-                    print("App Owners: Skipped (support group not found)")
-elif len(sys.argv) > 2 and sys.argv[1] == "--full-lookup":
-    hostname = sys.argv[2]
-    print(f"Full lookup chain for hostname: {hostname}\n")
-    
-    # Step 1: Get support group
-    support_info = get_support_group(hostname)
-    print("Step 1 - Support Group:")
-    print(json.dumps(support_info, indent=2))
-    
-    # Step 2: Get app owners (if support group was found)
-    if support_info.get('found') and support_info.get('support_group'):
-        print(f"\nStep 2 - App Owners:")
-        app_owner_info = get_app_owners(support_info['support_group'])
-        print(json.dumps(app_owner_info, indent=2))
-    else:
-        print(f"\nStep 2 - App Owners: Skipped (support group not found)")
-elif len(sys.argv) > 2 and sys.argv[1] == "--collate":
-    with open(sys.argv[2], 'r') as f:
-        ticket_content = f.read()
-    
-    print(f"Collating ticket: {sys.argv[2]}\n")
-    print(f"Content: {ticket_content.strip()}\n")
-    
-    result = collate_ticket_results(ticket_content)
-    print("Collated Results:")
-    print(json.dumps(result, indent=2))
-elif len(sys.argv) > 2 and sys.argv[1] == "--batch":
-    # Batch processing with collation - can handle multiple files or directories
-    ticket_files = []
-    
-    for arg in sys.argv[2:]:
-        if os.path.isdir(arg):
-            # If it's a directory, get all .txt files in it
-            pattern = os.path.join(arg, "*.txt")
-            ticket_files.extend(glob.glob(pattern))
-        elif os.path.isfile(arg):
-            # If it's a file, add it directly
-            ticket_files.append(arg)
-        elif "*" in arg or "?" in arg:
-            # If it's a glob pattern, expand it
-            ticket_files.extend(glob.glob(arg))
-        else:
-            print(f"Warning: '{arg}' not found or not a valid file/directory/pattern")
-    
-    if not ticket_files:
-        print("No ticket files found to process!")
-    else:
-        print(f"Processing {len(ticket_files)} ticket files with collation...\n")
-        
-        # Aggregate data across all tickets
-        all_groups = {}
-        all_errors = {"hostnames_not_found": [], "support_groups_not_found": [], "other_errors": []}
-        total_summary = {"total_hostnames": 0, "total_support_groups": 0, "successful_lookups": 0, "failed_lookups": 0}
-        
-        for i, ticket_file in enumerate(ticket_files, 1):
-            print(f"{'='*60}")
-            print(f"TICKET {i}/{len(ticket_files)}: {ticket_file}")
-            print(f"{'='*60}")
+    # Group details
+    if results.get('results'):
+        for group_name, group_data in results['results'].items():
+            output.append(f"\n[{group_name}]")
+            output.append(f"Hostnames: {', '.join(group_data['hostnames'])}")
             
-            try:
-                with open(ticket_file, 'r') as f:
-                    ticket_content = f.read()
-                
-                print(f"Content: {ticket_content.strip()}\n")
-                
-                # Collate this ticket
-                ticket_result = collate_ticket_results(ticket_content)
-                
-                # Display individual ticket summary
-                print("Ticket Summary:")
-                print(json.dumps(ticket_result["summary"], indent=2))
-                
-                if ticket_result["errors"]["other_errors"]:
-                    print(f"Errors: {ticket_result['errors']['other_errors']}")
-                
-                # Aggregate into overall results
-                total_summary["total_hostnames"] += ticket_result["summary"]["total_hostnames"]
-                total_summary["successful_lookups"] += ticket_result["summary"]["successful_lookups"]
-                total_summary["failed_lookups"] += ticket_result["summary"]["failed_lookups"]
-                
-                # Merge groups (hostnames from multiple tickets can be in same group)
-                for group_name, group_data in ticket_result["groups"].items():
-                    if group_name not in all_groups:
-                        all_groups[group_name] = group_data.copy()
-                    else:
-                        # Merge hostnames and issue types
-                        all_groups[group_name]["hostnames"].extend(group_data["hostnames"])
-                        all_groups[group_name]["hostname_details"].update(group_data["hostname_details"])
-                        for issue_type in group_data["issue_types"]:
-                            if issue_type not in all_groups[group_name]["issue_types"]:
-                                all_groups[group_name]["issue_types"].append(issue_type)
-                
-                # Merge errors
-                all_errors["hostnames_not_found"].extend(ticket_result["errors"]["hostnames_not_found"])
-                all_errors["support_groups_not_found"].extend(ticket_result["errors"]["support_groups_not_found"])
-                all_errors["other_errors"].extend(ticket_result["errors"]["other_errors"])
-                
-                print("\n")
-                
-            except Exception as e:
-                print(f"Error processing {ticket_file}: {str(e)}\n")
-                all_errors["other_errors"].append(f"Failed to process {ticket_file}: {str(e)}")
+            contacts = group_data.get('contacts', {})
+            if contacts:
+                if contacts.get('email_distros'):
+                    output.append(f"Email: {contacts['email_distros']}")
+                if contacts.get('individual_contacts'):
+                    output.append(f"Contacts: {contacts['individual_contacts']}")
+            else:
+                output.append("Contact information not found")
+    
+    # Errors
+    if results.get('errors', {}).get('hostnames_not_found'):
+        output.append(f"\nHostnames not found: {', '.join(results['errors']['hostnames_not_found'])}")
+    
+    return '\n'.join(output)
+
+def main():
+    parser = argparse.ArgumentParser(description='Simplified Ticket Processing System')
+    
+    # Single ticket processing
+    parser.add_argument('--ticket', type=str, help='Process a single ticket file')
+    
+    # Batch processing
+    parser.add_argument('--batch', nargs='+', help='Process multiple ticket files')
+    
+    # Lookup functions
+    parser.add_argument('--lookup', type=str, help='Look up support group for a hostname')
+    parser.add_argument('--contacts', type=str, help='Look up contacts for a support group')
+    
+    # Cache control
+    parser.add_argument('--clear-cache', action='store_true', help='Clear the cache')
+    
+    # Output format
+    parser.add_argument('--json', action='store_true', help='Output in JSON format')
+    
+    args = parser.parse_args()
+    
+    # Clear cache if requested
+    if args.clear_cache:
+        cache.clear()
+        print("Cache cleared.")
+        return
+    
+    # Single hostname lookup
+    if args.lookup:
+        result = get_support_group(args.lookup)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            if result['found']:
+                print(f"Hostname: {result['hostname']}")
+                print(f"Support Group: {result['support_group']}")
+            else:
+                print(f"Hostname '{args.lookup}' not found")
+        return
+    
+    # Contact lookup
+    if args.contacts:
+        result = get_app_owners(args.contacts)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            if result['found']:
+                print(f"Support Group: {result['support_group']}")
+                contacts = result.get('contacts', {})
+                if contacts.get('email_distros'):
+                    print(f"Email: {contacts['email_distros']}")
+                if contacts.get('individual_contacts'):
+                    print(f"Contacts: {contacts['individual_contacts']}")
+            else:
+                print(f"Support group '{args.contacts}' not found")
+        return
+    
+    # Single ticket processing
+    if args.ticket:
+        try:
+            with open(args.ticket, 'r') as f:
+                content = f.read()
+            
+            results = process_ticket(content)
+            
+            if args.json:
+                print(json.dumps(results, indent=2))
+            else:
+                print(format_results(results))
         
-        # Calculate final summary
-        total_summary["total_support_groups"] = len(all_groups)
-        total_summary["coverage_percentage"] = int(round((total_summary["successful_lookups"] / total_summary["total_hostnames"] * 100) if total_summary["total_hostnames"] > 0 else 0))
+        except FileNotFoundError:
+            print(f"Error: File '{args.ticket}' not found")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error processing ticket: {str(e)}")
+            sys.exit(1)
+        return
+    
+    # Batch processing
+    if args.batch:
+        all_results = {}
         
-        # Display final aggregated results
-        print("="*80)
-        print("FINAL AGGREGATED RESULTS")
-        print("="*80)
+        for pattern in args.batch:
+            files = glob.glob(pattern)
+            
+            for file_path in files:
+                try:
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                    
+                    print(f"\nProcessing: {file_path}")
+                    results = process_ticket(content)
+                    all_results[file_path] = results
+                    
+                    if not args.json:
+                        print(format_results(results))
+                
+                except Exception as e:
+                    print(f"Error processing {file_path}: {str(e)}")
+                    all_results[file_path] = {"status": "error", "message": str(e)}
         
-        final_result = {
-            "summary": total_summary,
-            "groups": all_groups,
-            "errors": all_errors
-        }
+        if args.json:
+            print(json.dumps(all_results, indent=2))
         
-        print(json.dumps(final_result, indent=2))
-else:
-    print("Usage:")
-    print("  python main.py --ticket <filename>        # Parse a ticket file")
-    print("  python main.py --lookup <hostname>        # Look up support group for hostname")
-    print("  python main.py --app-owners <group>       # Look up app owners for support group")
-    print("  python main.py --full-lookup <hostname>   # Complete hostname → support group → app owners")
-    print("  python main.py --combined <filename>      # Parse ticket and complete lookup chain")
-    print("  python main.py --collate <filename>       # Parse ticket and group hostnames by support group")
-    print("  python main.py --batch <files/dirs>       # Batch process and collate multiple ticket files")
-    print("")
-    print("Batch examples:")
-    print("  python main.py --batch ticket1.txt ticket2.txt    # Process specific files")
-    print("  python main.py --batch tickets/                   # Process all .txt files in directory")
-    print("  python main.py --batch 'ticket*.txt'             # Process files matching pattern")
+        return
+    
+    # No arguments provided
+    parser.print_help()
+
+if __name__ == "__main__":
+    main() 

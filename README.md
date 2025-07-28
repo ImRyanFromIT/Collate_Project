@@ -1,151 +1,86 @@
-# LinuxProject
-Multi-step ticket processing system for automated hostname identification and support group routing.
+# Ticket Processing System
 
-## Overview
-This system processes IT support tickets to automatically identify hostnames, determine responsible support groups, and gather contact information for efficient incident routing. Sheets in repo are copies of sheets being called via API. 
+A streamlined system that automatically extracts hostnames from IT tickets and routes them to the appropriate support teams.
 
-## Workflow
-```
-1. Ticket Input → 2. Parse Hostnames → 3. Lookup Support Groups → 4. Lookup App Owners → 5. Collate by Group → 6. Ready for Email
-```
+## 🚀 What It Does
 
-### Detailed Process:
-1. **Ticket Parsing**: Uses GPT3.5 to extract hostnames and issue types from unstructured ticket text
-2. **Support Group Lookup**: API call to Support Group SoT sheet to find support group for a hostname
-3. **App Owner Lookup**: API call to App Owners Data sheet to find contact information for a support group
-4. **Collation**: Groups all results by support group for efficient communication
-5. **Output**: Structured data ready for email generation or manual review
+1. **Extracts hostnames** from ticket text using OpenAI
+2. **Looks up support groups** for each hostname via Google Sheets
+3. **Finds contact information** for support teams
+4. **Groups results** by support team for efficient notification
 
-## Core Functions
+## 📋 Quick Setup
 
-### `parse_ticket(ticket_text)`
-- **Purpose**: Extract hostnames and issue types from ticket text using OpenAI
-- **Input**: Raw ticket content (string)
-- **Output**: Structured data with hostnames, confidence levels, and issue types
-- **AI Model**: GPT-3.5-turbo
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### `get_support_group(hostname)`
-- **Purpose**: API call to Support Group SoT sheet to find support group for a hostname
-- **Input**: Hostname (string)
-- **Output**: Support group name and lookup status
-- **Data Source**: Google Sheets (Column A: Support Group, Column C: Server Name)
+2. **Configure the system:**
+   - Update `config.json` with your OpenAI API key
+   - Place your Google Service Account credentials in the project folder
+   - Update Google Sheets IDs in config if using different sheets
 
-### `get_app_owners(support_group)`
-- **Purpose**: API call to App Owners Data sheet to find contact information for a support group
-- **Input**: Support group name (string)
-- **Output**: App owners, email distros, and individual contacts
-- **Data Source**: Google Sheets (Column A: App Owner, Column B: Email Distros, Column C: Individual Contacts)
+3. **Ready to go!**
 
-### `collate_ticket_results(ticket_content)`
-- **Purpose**: Complete end-to-end processing with grouping by support group!
-- **Input**: Raw ticket content (string)
-- **Output**: Hostnames grouped by support group with summary statistics
-- **Benefits**: Reduces duplicate communications, organizes results for email routing
+## 💡 Basic Usage
 
-## Command Line Interface
+### Simple hostname extraction:
+```python
+from main_simplified import parse_ticket
 
-### Individual Functions
-```bash
-# Parse a single ticket file
-python main.py --ticket <filename>
-
-# Look up support group for a specific hostname
-python main.py --lookup <hostname>
-
-# Look up app owners for a specific support group
-python main.py --app-owners <support_group>
-
-# Complete lookup chain for single hostname
-python main.py --full-lookup <hostname>
-
-# Parse ticket and perform complete lookup chain
-python main.py --combined <filename>
-
-# Parse ticket and group results by support group
-python main.py --collate <filename>
+ticket_text = "Server CLOUD-LNX-DOCK01 is not responding"
+result = parse_ticket(ticket_text)
+print(result['hostnames'])  # ['CLOUD-LNX-DOCK01']
 ```
 
-### Batch Processing
-```bash
-# Process multiple ticket files with collation
-python main.py --batch <files/directories>
+### Complete ticket processing:
+```python
+from main_simplified import process_ticket
 
-# Examples:
-python main.py --batch ticket1.txt ticket2.txt ticket3.txt
-python main.py --batch tickets/
-python main.py --batch "ticket*.txt"
+results = process_ticket("Issues with CLOUD-LNX-DOCK01 and DATAN-LNX-HADOOP01")
+# Returns grouped results by support team with contact info
 ```
 
-## Configuration Requirements
+### Individual lookups:
+```python
+from main_simplified import get_support_group, get_app_owners
 
-### Google Sheets Setup
-1. **Sheet 1**: Support Group mapping
-   - Column A: Support Group
-   - Column C: Server Name/Hostname
-   
-2. **Sheet 2**: App Owner contacts
-   - Column A: Remedy application name (app owner)
-   - Column B: Email distros
-   - Column C: Individual contacts
+# Find support group for a hostname
+support = get_support_group("CLOUD-LNX-DOCK01")
 
-### API Keys
-- **OpenAI API Key**: Set as environment variable `OPENAI_API_KEY`
-- **Google Service Account**: JSON file (`linux-project-464606-a2b6ecdaa8b5.json`)
-
-### Dependencies
-```bash
-pip install -r requirements.txt
+# Get contacts for a support group
+contacts = get_app_owners("Linux Cloud Team")
 ```
 
-## Sample Output Structure
+## ✨ Key Features
 
-### Collated Results
-```json
-{
-  "summary": {
-    "total_hostnames": 4,
-    "total_support_groups": 2,
-    "successful_lookups": 3,
-    "failed_lookups": 1,
-    "coverage_percentage": 75
-  },
-  "groups": {
-    "Linux Support Team": {
-      "support_group": "Linux Support Team",
-      "hostnames": ["QATEST-LNX-AUTO01", "CLOUD-LNX-DOCK01"],
-      "email_distros": "linux-support@company.com",
-      "individual_contacts": "john.doe@company.com",
-      "issue_types": ["reboot", "maintenance"]
-    }
-  },
-  "errors": {
-    "hostnames_not_found": ["UNKNOWN-SERVER"],
-    "support_groups_not_found": [],
-    "other_errors": []
-  }
-}
+- **Smart Parsing**: Uses AI to reliably extract hostnames from natural language
+- **Efficient Caching**: 1-hour cache reduces API calls and improves performance  
+- **Batch Processing**: Handle multiple hostnames in a single operation
+- **Flexible Integration**: Use individual functions or complete workflow
+- **Error Handling**: Graceful handling of missing hostnames/support groups
+
+## 📁 Project Structure
+
+```
+├── main_simplified.py      # Core processing functions
+├── example_usage.py        # Usage examples and patterns
+├── config.json            # Configuration settings
+├── requirements.txt       # Python dependencies
+└── *.json                 # Google Service Account credentials
 ```
 
-## Use Cases
+## 🔧 Configuration
 
-### Primary: Batch Ticket Processing
-- Process multiple tickets simultaneously
-- Group hostnames by support team
-- Generate organized contact lists for incident response
+Edit `config.json` to customize:
+- **OpenAI settings**: API key, model, temperature
+- **Google Sheets**: Sheet IDs and credentials file
+- **Caching**: Enable/disable and TTL settings
 
-### Secondary: Individual Lookups
-- Quick hostname-to-support-group lookups
-- Verification of contact information
-- Testing and debugging data sources
+## 📚 Learn More
 
-## Error Handling
-- **Hostname not found**: Tracked in errors section, processing continues
-- **Support group not found**: Tracked separately, partial results preserved
-- **API failures**: Graceful degradation with error reporting
-- **File not found**: Clear error messages with usage instructions
+Run `python example_usage.py` to see detailed examples of all functionality.
 
-## Future Enhancements
-- Email generation and sending functionality
-- API Integration with ticketing systems
-- Historical data tracking and analytics (memory)
-- Support for fallback to additional data sources
+---
+*For questions or issues, check the example usage file or review the inline documentation.*

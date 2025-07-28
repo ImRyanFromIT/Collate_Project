@@ -71,7 +71,7 @@ contacts = get_app_owners("Linux Cloud Team")
 └── *.json                 # Google Service Account credentials
 ```
 
-## 🔧 Configuration
+##  Configuration
 
 Edit `config.json` to customize:
 - **OpenAI settings**: API key, model, temperature

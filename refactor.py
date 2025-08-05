@@ -188,6 +188,95 @@ def process_ticket(ticket_file_path):
         }
     }
 
+def process_batch_tickets(file_patterns):
+    """
+    Process multiple ticket files and aggregate all hostnames together.
+    Input: List of file patterns to process
+    Returns: Aggregated results from all tickets
+    """
+    all_hostnames = []
+    processed_files = []
+    file_errors = []
+    
+    # Step 1: Collect all hostnames from all files
+    for pattern in file_patterns:
+        files = glob.glob(pattern)
+        
+        for file_path in files:
+            try:
+                parse_result = parse_ticket(file_path)
+                hostnames = parse_result.get('hostnames', [])
+                
+                if hostnames:
+                    all_hostnames.extend(hostnames)
+                    processed_files.append(file_path)
+                else:
+                    processed_files.append(file_path)
+                
+                if 'error' in parse_result:
+                    file_errors.append(f"{file_path}: {parse_result['error']}")
+                    
+            except Exception as e:
+                file_errors.append(f"{file_path}: {str(e)}")
+    
+    # Remove duplicates while preserving order
+    unique_hostnames = []
+    for hostname in all_hostnames:
+        if hostname not in unique_hostnames:
+            unique_hostnames.append(hostname)
+    
+    if not unique_hostnames:
+        return {
+            "status": "success",
+            "message": "No hostnames found in any ticket files",
+            "files_processed": processed_files,
+            "results": {},
+            "errors": {
+                "file_errors": file_errors,
+                "hostnames_not_found": []
+            }
+        }
+    
+    # Step 2: Process all unique hostnames and group by support group
+    groups = {}
+    not_found = []
+    
+    for hostname in unique_hostnames:
+        # Get support group
+        support_info = get_support_group(hostname)
+        
+        if not support_info['found']:
+            not_found.append(hostname)
+            continue
+        
+        support_group = support_info['support_group']
+        
+        # Group results
+        if support_group not in groups:
+            groups[support_group] = {
+                "hostnames": [],
+                "support_group_name": support_group
+            }
+        
+        groups[support_group]["hostnames"].append(hostname)
+    
+    # Step 3: Create aggregated summary
+    return {
+        "status": "success",
+        "summary": {
+            "files_processed": len(processed_files),
+            "total_hostnames": len(unique_hostnames),
+            "grouped_into": len(groups),
+            "not_found": len(not_found)
+        },
+        "files_processed": processed_files,
+        "results": groups,
+        "errors": {
+            "file_errors": file_errors,
+            "hostnames_not_found": not_found
+        }
+    }
+
 def format_results(results):
     """Format results for display"""
     output = []
@@ -196,9 +285,19 @@ def format_results(results):
     
     # Summary
     if 'summary' in results:
+        if 'files_processed' in results['summary']:
+            # Batch processing format
+            output.append(f"Files Processed: {results['summary']['files_processed']}")
         output.append(f"Total Hostnames: {results['summary']['total_hostnames']}")
         output.append(f"Support Groups: {results['summary']['grouped_into']}")
         output.append(f"Not Found: {results['summary']['not_found']}\n")
+    
+    # Show processed files for batch results
+    if 'files_processed' in results:
+        output.append("Processed Files:")
+        for file_path in results['files_processed']:
+            output.append(f"  - {file_path}")
+        output.append("")
     
     # Group details
     if results.get('results'):
@@ -209,6 +308,11 @@ def format_results(results):
     # Errors
     if results.get('errors', {}).get('hostnames_not_found'):
         output.append(f"\nHostnames not found: {', '.join(results['errors']['hostnames_not_found'])}")
+    
+    if results.get('errors', {}).get('file_errors'):
+        output.append(f"\nFile errors:")
+        for error in results['errors']['file_errors']:
+            output.append(f"  - {error}")
     
     return '\n'.join(output)
 
@@ -270,26 +374,17 @@ def main():
     
     # Batch processing
     if args.batch:
-        all_results = {}
-        
-        for pattern in args.batch:
-            files = glob.glob(pattern)
+        try:
+            results = process_batch_tickets(args.batch)
             
-            for file_path in files:
-                try:
-                    print(f"\nProcessing: {file_path}")
-                    results = process_ticket(file_path)
-                    all_results[file_path] = results
-                    
-                    if not args.json:
-                        print(format_results(results))
-                
-                except Exception as e:
-                    print(f"Error processing {file_path}: {str(e)}")
-                    all_results[file_path] = {"status": "error", "message": str(e)}
+            if args.json:
+                print(json.dumps(results, indent=2))
+            else:
+                print(format_results(results))
         
-        if args.json:
-            print(json.dumps(all_results, indent=2))
+        except Exception as e:
+            print(f"Error processing batch: {str(e)}")
+            sys.exit(1)
         
         return
     

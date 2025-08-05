@@ -81,7 +81,7 @@ def parse_ticket(ticket_file_path):
 def get_support_group(hostname, use_cache=True):
     """
     Find support group for a hostname from CSV file.
-    CSV format: hostname (column 1), support_group (column 7)
+    CSV format: hostname (column 1), support_group (column 10)
     Returns: {"hostname": str, "support_group": str|None, "found": bool}
     """
     # Check cache first
@@ -98,15 +98,15 @@ def get_support_group(hostname, use_cache=True):
         df = pd.read_csv(csv_file_path)
         
         # Ensure we have enough columns
-        if len(df.columns) < 7:
+        if len(df.columns) < 10:
             return {"hostname": hostname, "support_group": None, "found": False, "error": "CSV file has insufficient columns"}
         
         # Search for hostname in column 1 (index 0) - case insensitive
         hostname_match = df[df.iloc[:, 0].str.strip().str.upper() == hostname.strip().upper()]
         
         if not hostname_match.empty:
-            # Get the support group from column 7 (index 6)
-            support_group = hostname_match.iloc[0, 6] if pd.notna(hostname_match.iloc[0, 6]) else None
+            # Get the support group from column 10 (index 9)
+            support_group = hostname_match.iloc[0, 9] if pd.notna(hostname_match.iloc[0, 9]) else None
             
             result = {
                 "hostname": hostname,
@@ -331,9 +331,6 @@ def main():
     # Cache control
     parser.add_argument('--clear-cache', action='store_true', help='Clear the cache')
     
-    # Output format
-    parser.add_argument('--json', action='store_true', help='Output in JSON format')
-    
     args = parser.parse_args()
     
     # Clear cache if requested
@@ -345,27 +342,20 @@ def main():
     # Single hostname lookup
     if args.lookup:
         result = get_support_group(args.lookup)
-        if args.json:
-            print(json.dumps(result, indent=2))
+        if result['found']:
+            print(f"Hostname: {result['hostname']}")
+            print(f"Support Group: {result['support_group']}")
         else:
-            if result['found']:
-                print(f"Hostname: {result['hostname']}")
-                print(f"Support Group: {result['support_group']}")
-            else:
-                print(f"Hostname '{args.lookup}' not found")
-                if 'error' in result:
-                    print(f"Error: {result['error']}")
+            print(f"Hostname '{args.lookup}' not found")
+            if 'error' in result:
+                print(f"Error: {result['error']}")
         return
     
     # Single ticket processing
     if args.ticket:
         try:
             results = process_ticket(args.ticket)
-            
-            if args.json:
-                print(json.dumps(results, indent=2))
-            else:
-                print(format_results(results))
+            print(format_results(results))
         
         except Exception as e:
             print(f"Error processing ticket: {str(e)}")
@@ -376,11 +366,7 @@ def main():
     if args.batch:
         try:
             results = process_batch_tickets(args.batch)
-            
-            if args.json:
-                print(json.dumps(results, indent=2))
-            else:
-                print(format_results(results))
+            print(format_results(results))
         
         except Exception as e:
             print(f"Error processing batch: {str(e)}")

@@ -5,6 +5,9 @@
     "app_owners_sheet_id": "1YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
     "credentials_file": "path/to/your/service-account-credentials.json"
   },
+  "csv_files": {
+    "assets_csv": "assets.csv"
+  },
   "openai": {
     "api_key": "sk-proj-YOUR_OPENAI_API_KEY_HERE",
     "model": "gpt-3.5-turbo",

@@ -1,4 +1,4 @@
-QATEST-LNX-AUTO01
-CLOUD-LNX-DOCK01
-IDMGT-LNX-LDAP0
-DEVFE-LNX-NODE02
+what if theres Server: xobpdba1
+Server: xocpapp2  
+Server: xoepnlb1
+Server: xofpmon2

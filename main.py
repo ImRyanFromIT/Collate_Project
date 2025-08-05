@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simplified Ticket Processing System
-Focuses on: Hostname extraction and App Owner lookup
-"""
-
 import openai
 import json
 import sys
@@ -23,7 +18,7 @@ def load_config():
 
 CONFIG = load_config()
 
-# Simple cache implementation
+# Cache implementation
 class SimpleCache:
     def __init__(self, ttl_seconds=3600):
         self._cache = {}
@@ -47,41 +42,37 @@ class SimpleCache:
 # Initialize cache
 cache = SimpleCache(ttl_seconds=CONFIG['cache']['ttl_seconds'])
 
-def parse_ticket(ticket_text):
+def parse_ticket(remedy_ticket):
     """
-    Extract hostnames from ticket text using OpenAI.
-    Returns a simple list of hostnames found.
+    Extract hostnames from Remedy ticket Description field.
+    Input: Dictionary with Remedy ticket fields (expects 'Description' field)
+    Returns: {"hostnames": ["hostname1", "hostname2", ...]}
     """
-    client = openai.OpenAI(api_key=CONFIG['openai']['api_key'])
+    import re
     
-    response = client.chat.completions.create(
-        model=CONFIG['openai']['model'],
-        messages=[
-            {"role": "system", "content": """Extract ALL hostnames from the ticket text.
-            Return a simple JSON list of hostnames found.
-            
-            Hostname patterns to look for:
-            - Server names (e.g., WEB01, DB-PROD-01, APP-SERVER-03)
-            - Fully qualified domain names (e.g., server.company.com)
-            - Any identifier that represents a specific machine/server
-            
-            Return format: {"hostnames": ["hostname1", "hostname2", ...]}
-            
-            If no hostnames found, return: {"hostnames": []}"""},
-            {"role": "user", "content": ticket_text}
-        ],
-        temperature=CONFIG['openai']['temperature']
-    )
+    # Get the description field from the Remedy ticket
+    description = remedy_ticket.get('Description', '')
     
-    content = response.choices[0].message.content
-    if content is None:
-        return {"hostnames": [], "error": "No content received from API"}
+    # If no description, return empty
+    if not description:
+        return {"hostnames": []}
     
-    try:
-        result = json.loads(content)
-        return {"hostnames": result.get("hostnames", [])}
-    except json.JSONDecodeError:
-        return {"hostnames": [], "error": "Failed to parse AI response"}
+    # Pattern to match "Server: hostname" (case insensitive)
+    pattern = r'Server:\s*([^\s\n]+)'
+    
+    # Find all hostnames
+    hostnames = re.findall(pattern, description, re.IGNORECASE)
+    
+    # Clean up hostnames (remove empty strings, strip whitespace)
+    hostnames = [hostname.strip() for hostname in hostnames if hostname.strip()]
+    
+    # Remove duplicates while preserving order
+    unique_hostnames = []
+    for hostname in hostnames:
+        if hostname not in unique_hostnames:
+            unique_hostnames.append(hostname)
+    
+    return {"hostnames": unique_hostnames}
 
 @lru_cache(maxsize=1)
 def get_google_sheets_client():
@@ -184,19 +175,13 @@ def get_app_owners(support_group, use_cache=True):
     except Exception as e:
         return {"support_group": support_group, "contacts": {}, "found": False, "error": str(e)}
 
-def process_ticket(ticket_content):
+def process_ticket(remedy_ticket):
     """
-    Main processing function: parse ticket and collate results by support group.
+    Main processing function: parse Remedy ticket and collate results by support group.
+    Input: Remedy ticket dictionary (expects 'Description' field)
     """
     # Step 1: Parse ticket
-    parse_result = parse_ticket(ticket_content)
-    
-    if 'error' in parse_result:
-        return {
-            "status": "error",
-            "message": f"Failed to parse ticket: {parse_result['error']}",
-            "results": {}
-        }
+    parse_result = parse_ticket(remedy_ticket)
     
     hostnames = parse_result.get('hostnames', [])
     

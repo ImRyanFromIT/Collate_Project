@@ -1,0 +1,10 @@
+{
+  "_comment": "Configuration file for the refactored ticket processing system",
+  "csv_files": {
+    "assets_csv": "assets.csv"
+  },
+  "cache": {
+    "enabled": true,
+    "ttl_seconds": 3600
+  }
+}

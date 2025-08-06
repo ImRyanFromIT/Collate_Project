@@ -11,8 +11,13 @@ import re
 
 def load_config():
     """Load configuration from config.json"""
-    with open('config.json', 'r') as f:
-        return json.load(f)
+    try:
+        with open('config.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError("config.json not found. Please ensure the configuration file exists.")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in config.json: {e}")
 
 CONFIG = load_config()
 
@@ -56,10 +61,7 @@ def parse_ticket(ticket_file_path):
         
         # Clean and deduplicate hostnames
         hostnames = [hostname.strip() for hostname in hostnames if hostname.strip()]
-        unique_hostnames = []
-        for hostname in hostnames:
-            if hostname not in unique_hostnames:
-                unique_hostnames.append(hostname)
+        unique_hostnames = list(dict.fromkeys(hostnames)) 
         
         return {"hostnames": unique_hostnames}
     
@@ -84,10 +86,11 @@ def get_support_group(hostname, use_cache=True):
         df = pd.read_csv(csv_file_path)
         
         if len(df.columns) < 10:
-            return {"hostname": hostname, "support_group": None, "found": False, "error": "CSV file has insufficient columns"}
+            return {"hostname": hostname, "support_group": None, "found": False, "error": "CSV file is not compatible."}
         
         # Case-insensitive hostname lookup in column 1
-        hostname_match = df[df.iloc[:, 0].str.strip().str.upper() == hostname.strip().upper()]
+        hostname_upper = hostname.strip().upper()
+        hostname_match = df[df.iloc[:, 0].str.strip().str.upper() == hostname_upper]
         
         if not hostname_match.empty:
             support_group = hostname_match.iloc[0, 9] if pd.notna(hostname_match.iloc[0, 9]) else None
@@ -109,74 +112,91 @@ def get_support_group(hostname, use_cache=True):
     except Exception as e:
         return {"hostname": hostname, "support_group": None, "found": False, "error": str(e)}
 
-def process_ticket(ticket_file_path):
+def get_app_owners(support_group, use_cache=True):
     """
-    Main processing function: parse ticket file and collate results by support group.
-    Input: Path to ticket .txt file
+    Find app owners for a support group from CSV file.
+    CSV format: Remedy Application Name (column 1), Email Distro (column 2), Individual Contacts (column 3), Notes (column 4)
+    Returns: {"support_group": str, "contacts": {...}, "found": bool}
     """
-    parse_result = parse_ticket(ticket_file_path)
-    hostnames = parse_result.get('hostnames', [])
+    if use_cache and CONFIG['cache']['enabled']:
+        cached_result = cache.get(f"app_owners:{support_group}")
+        if cached_result is not None:
+            return cached_result
     
-    if not hostnames:
-        return {
-            "status": "success",
-            "message": "No hostnames found in ticket",
-            "results": {},
-            "errors": parse_result.get('error', {})
-        }
-    
-    # Group hostnames by support group
-    groups = {}
-    not_found = []
-    
-    for hostname in hostnames:
-        support_info = get_support_group(hostname)
+    try:
+        csv_file_path = CONFIG['csv_files']['email_distros_csv']
+        df = pd.read_csv(csv_file_path)
         
-        if not support_info['found']:
-            not_found.append(hostname)
-            continue
+        if len(df.columns) < 4:
+            return {"support_group": support_group, "contacts": {}, "found": False, "error": "CSV file is not compatible."}
         
-        support_group = support_info['support_group']
-        if support_group not in groups:
-            groups[support_group] = {
-                "hostnames": [],
-                "support_group_name": support_group
+        # Case-insensitive support group lookup in column 1 (optimized)
+        support_group_upper = support_group.strip().upper()
+        group_match = df[df.iloc[:, 0].str.strip().str.upper() == support_group_upper]
+        
+        if not group_match.empty:
+            result = {
+                "support_group": support_group,
+                "contacts": {
+                    "app_owner": group_match.iloc[0, 0] if pd.notna(group_match.iloc[0, 0]) else None,
+                    "email_distros": group_match.iloc[0, 1] if pd.notna(group_match.iloc[0, 1]) else None,
+                    "individual_contacts": group_match.iloc[0, 2] if pd.notna(group_match.iloc[0, 2]) else None,
+                    "notes": group_match.iloc[0, 3] if pd.notna(group_match.iloc[0, 3]) else None
+                },
+                "found": True
             }
-        groups[support_group]["hostnames"].append(hostname)
-    return {
-        "status": "success",
-        "summary": {
-            "total_hostnames": len(hostnames),
-            "grouped_into": len(groups),
-            "not_found": len(not_found)
-        },
-        "results": groups,
-        "errors": {
-            "hostnames_not_found": not_found
-        }
-    }
+            
+            if CONFIG['cache']['enabled']:
+                cache.set(f"app_owners:{support_group}", result)
+            return result
+        
+        result = {"support_group": support_group, "contacts": {}, "found": False}
+        if CONFIG['cache']['enabled']:
+            cache.set(f"app_owners:{support_group}", result)
+        return result
+        
+    except FileNotFoundError:
+        return {"support_group": support_group, "contacts": {}, "found": False, "error": f"CSV file not found: {CONFIG['csv_files']['email_distros_csv']}"}
+    except KeyError as e:
+        return {"support_group": support_group, "contacts": {}, "found": False, "error": f"Configuration missing: {str(e)}"}
+    except Exception as e:
+        return {"support_group": support_group, "contacts": {}, "found": False, "error": str(e)}
 
-def process_batch_tickets(file_patterns):
+def process_tickets(file_inputs, is_batch=False):
     """
-    Process multiple ticket files and aggregate all hostnames together.
-    Input: List of file patterns to process
-    Returns: Aggregated results from all tickets
+    Process single ticket file or multiple files/patterns and group by support teams.
+    
+    Args:
+        file_inputs: str (single file path) or list (file patterns for batch processing)
+        is_batch: bool indicating whether this is batch processing
+        
+    Returns:
+        dict: Processing results with hostnames grouped by support teams
     """
+    # Normalize input to list format
+    if isinstance(file_inputs, str):
+        file_patterns = [file_inputs]
+    else:
+        file_patterns = file_inputs
+    
+    # Collect hostnames from all files
     all_hostnames = []
     processed_files = []
     file_errors = []
     
-    # Collect hostnames from all matching files
     for pattern in file_patterns:
-        files = glob.glob(pattern)
+        # For single file mode, treat pattern as direct file path
+        if not is_batch:
+            files = [pattern]
+        else:
+            files = glob.glob(pattern)
         
         for file_path in files:
             try:
                 parse_result = parse_ticket(file_path)
                 hostnames = parse_result.get('hostnames', [])
                 
-                if hostnames:
-                    all_hostnames.extend(hostnames)
+                all_hostnames.extend(hostnames)  # Extend even if empty - more concise
                 processed_files.append(file_path)
                 
                 if 'error' in parse_result:
@@ -185,25 +205,35 @@ def process_batch_tickets(file_patterns):
             except Exception as e:
                 file_errors.append(f"{file_path}: {str(e)}")
     
-    # Deduplicate hostnames
-    unique_hostnames = []
-    for hostname in all_hostnames:
-        if hostname not in unique_hostnames:
-            unique_hostnames.append(hostname)
+    # For batch processing, deduplicate hostnames
+    if is_batch:
+        unique_hostnames = list(dict.fromkeys(all_hostnames))
+    else:
+        unique_hostnames = all_hostnames
     
+    # Handle no hostnames found
     if not unique_hostnames:
-        return {
+        result = {
             "status": "success",
-            "message": "No hostnames found in any ticket files",
-            "files_processed": processed_files,
+            "message": "No hostnames found in ticket" + ("s" if is_batch else ""),
             "results": {},
             "errors": {
-                "file_errors": file_errors,
                 "hostnames_not_found": []
             }
         }
+        
+        # Add batch-specific fields
+        if is_batch:
+            result["files_processed"] = processed_files
+            result["errors"]["file_errors"] = file_errors
+        else:
+            # For single file, include parse errors in main errors
+            if file_errors:
+                result["errors"] = file_errors[0].split(": ", 1)[1] if file_errors else {}
+        
+        return result
     
-    # Group unique hostnames by support group
+    # Group hostnames by support group
     groups = {}
     not_found = []
     
@@ -215,27 +245,40 @@ def process_batch_tickets(file_patterns):
             continue
         
         support_group = support_info['support_group']
+        
+        # Get app owners/contacts (only lookup once per support group)
         if support_group not in groups:
+            owner_info = get_app_owners(support_group)
             groups[support_group] = {
                 "hostnames": [],
-                "support_group_name": support_group
+                "support_group_name": support_group,
+                "contacts": owner_info.get('contacts', {}) if owner_info['found'] else {},
+                "contact_lookup_successful": owner_info['found']
             }
+        
         groups[support_group]["hostnames"].append(hostname)
-    return {
+    
+    # Build result structure
+    result = {
         "status": "success",
         "summary": {
-            "files_processed": len(processed_files),
             "total_hostnames": len(unique_hostnames),
             "grouped_into": len(groups),
             "not_found": len(not_found)
         },
-        "files_processed": processed_files,
         "results": groups,
         "errors": {
-            "file_errors": file_errors,
             "hostnames_not_found": not_found
         }
     }
+    
+    # Add batch-specific fields
+    if is_batch:
+        result["summary"]["files_processed"] = len(processed_files)
+        result["files_processed"] = processed_files
+        result["errors"]["file_errors"] = file_errors
+    
+    return result
 
 def format_results(results):
     """Format results for display"""
@@ -260,6 +303,17 @@ def format_results(results):
         for group_name, group_data in results['results'].items():
             output.append(f"\n[{group_name}]")
             output.append(f"Hostnames: {', '.join(group_data['hostnames'])}")
+            
+            contacts = group_data.get('contacts', {})
+            if contacts:
+                if contacts.get('email_distros'):
+                    output.append(f"Email: {contacts['email_distros']}")
+                if contacts.get('individual_contacts'):
+                    output.append(f"Contacts: {contacts['individual_contacts']}")
+                if contacts.get('notes'):
+                    output.append(f"Notes: {contacts['notes']}")
+            else:
+                output.append("Contact information not found")
     
     if results.get('errors', {}).get('hostnames_not_found'):
         output.append(f"\nHostnames not found: {', '.join(results['errors']['hostnames_not_found'])}")
@@ -276,6 +330,7 @@ def main():
     parser.add_argument('--ticket', type=str, help='Process a single ticket file (.txt)')
     parser.add_argument('--batch', nargs='+', help='Process multiple ticket files')
     parser.add_argument('--lookup', type=str, help='Look up support group for a hostname')
+    parser.add_argument('--contacts', type=str, help='Look up contacts for a support group')
     parser.add_argument('--clear-cache', action='store_true', help='Clear the cache')
     
     args = parser.parse_args()
@@ -296,9 +351,26 @@ def main():
                 print(f"Error: {result['error']}")
         return
     
+    if args.contacts:
+        result = get_app_owners(args.contacts)
+        if result['found']:
+            print(f"Support Group: {result['support_group']}")
+            contacts = result.get('contacts', {})
+            if contacts.get('email_distros'):
+                print(f"Email: {contacts['email_distros']}")
+            if contacts.get('individual_contacts'):
+                print(f"Contacts: {contacts['individual_contacts']}")
+            if contacts.get('notes'):
+                print(f"Notes: {contacts['notes']}")
+        else:
+            print(f"Support group '{args.contacts}' not found")
+            if 'error' in result:
+                print(f"Error: {result['error']}")
+        return
+    
     if args.ticket:
         try:
-            results = process_ticket(args.ticket)
+            results = process_tickets(args.ticket, is_batch=False)
             print(format_results(results))
         except Exception as e:
             print(f"Error processing ticket: {str(e)}")
@@ -307,7 +379,7 @@ def main():
     
     if args.batch:
         try:
-            results = process_batch_tickets(args.batch)
+            results = process_tickets(args.batch, is_batch=True)
             print(format_results(results))
         except Exception as e:
             print(f"Error processing batch: {str(e)}")

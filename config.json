@@ -1,7 +1,8 @@
 {
   "_comment": "Configuration file for the refactored ticket processing system",
   "csv_files": {
-    "assets_csv": "assets.csv"
+    "assets_csv": "assets.csv",
+    "email_distros_csv": "email_distros.csv"
   },
   "cache": {
     "enabled": true,

@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-import openai
 import json
 import sys
 import os
-import gspread
-from google.oauth2.service_account import Credentials
 from functools import lru_cache
 from datetime import datetime, timedelta
 import argparse

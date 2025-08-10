@@ -178,6 +178,66 @@ def get_app_owners(support_group, use_cache=True):
     except Exception as e:
         return {"support_group": support_group, "contacts": {}, "found": False, "error": str(e)}
 
+def get_maintenance_window(hostname, use_cache=True):
+    """
+    Find maintenance window for a hostname from CSV file.
+    Uses configurable column mappings from config.json
+    Returns: {"hostname": str, "maintenance": {"days": str, "start": str, "end": str}|{}, "found": bool}
+    """
+    if use_cache and CONFIG['cache']['enabled']:
+        cached_result = cache.get(f"maintenance:{hostname}")
+        if cached_result is not None:
+            return cached_result
+    
+    try:
+        file_path = CONFIG['csv_files']['maintenance_windows_file']
+        hostname_col = CONFIG['csv_columns']['maintenance_windows']['hostname_column']
+        days_col = CONFIG['csv_columns']['maintenance_windows']['days_column']
+        start_col = CONFIG['csv_columns']['maintenance_windows']['start_time_column']
+        end_col = CONFIG['csv_columns']['maintenance_windows']['end_time_column']
+        
+        # Read CSV file
+        df = pd.read_csv(file_path)
+        
+        # Validate column indices
+        max_col_needed = max(hostname_col, days_col, start_col, end_col)
+        if len(df.columns) <= max_col_needed:
+            return {"hostname": hostname, "maintenance": {}, "found": False, 
+                   "error": f"CSV file needs at least {max_col_needed + 1} columns, found {len(df.columns)}."}
+        
+        # Case-insensitive hostname lookup
+        hostname_upper = hostname.strip().upper()
+        hostname_match = df[df.iloc[:, hostname_col].astype(str).str.strip().str.upper() == hostname_upper]
+        
+        if not hostname_match.empty:
+            days = hostname_match.iloc[0, days_col] if pd.notna(hostname_match.iloc[0, days_col]) else None
+            start_time = hostname_match.iloc[0, start_col] if pd.notna(hostname_match.iloc[0, start_col]) else None
+            end_time = hostname_match.iloc[0, end_col] if pd.notna(hostname_match.iloc[0, end_col]) else None
+            
+            maintenance = {
+                "days": str(days).strip() if days is not None else None,
+                "start": str(start_time).strip() if start_time is not None else None,
+                "end": str(end_time).strip() if end_time is not None else None
+            }
+            
+            result = {"hostname": hostname, "maintenance": maintenance, "found": True}
+            
+            if CONFIG['cache']['enabled']:
+                cache.set(f"maintenance:{hostname}", result)
+            return result
+        
+        result = {"hostname": hostname, "maintenance": {}, "found": False}
+        if CONFIG['cache']['enabled']:
+            cache.set(f"maintenance:{hostname}", result)
+        return result
+        
+    except FileNotFoundError:
+        return {"hostname": hostname, "maintenance": {}, "found": False, "error": f"CSV file not found: {CONFIG['csv_files']['maintenance_windows_file']}"}
+    except KeyError as e:
+        return {"hostname": hostname, "maintenance": {}, "found": False, "error": f"Configuration missing: {str(e)}"}
+    except Exception as e:
+        return {"hostname": hostname, "maintenance": {}, "found": False, "error": str(e)}
+
 def process_tickets(file_inputs, is_batch=False):
     """
     Process single ticket file or multiple files/patterns and group by support teams.
@@ -262,6 +322,9 @@ def process_tickets(file_inputs, is_batch=False):
         
         support_group = support_info['support_group']
         
+        # Get maintenance window for this hostname
+        maintenance_info = get_maintenance_window(hostname)
+        
         # Get app owners/contacts (only lookup once per support group)
         if support_group not in groups:
             owner_info = get_app_owners(support_group)
@@ -272,7 +335,12 @@ def process_tickets(file_inputs, is_batch=False):
                 "contact_lookup_successful": owner_info['found']
             }
         
-        groups[support_group]["hostnames"].append(hostname)
+        # Add hostname with maintenance window info
+        hostname_entry = {"name": hostname}
+        if maintenance_info['found']:
+            hostname_entry["maintenance"] = maintenance_info['maintenance']
+        
+        groups[support_group]["hostnames"].append(hostname_entry)
     
     # Build result structure
     result = {
@@ -299,6 +367,7 @@ def process_tickets(file_inputs, is_batch=False):
 def format_results(results):
     """Format results for display"""
     output = []
+    all_missing_maintenance = []
     
     output.append("\n=== TICKET PROCESSING RESULTS ===\n")
     
@@ -318,7 +387,38 @@ def format_results(results):
     if results.get('results'):
         for group_name, group_data in results['results'].items():
             output.append(f"\n[{group_name}]")
-            output.append(f"Hostnames: {', '.join(group_data['hostnames'])}")
+            
+            # Format hostnames with maintenance windows
+            hostname_display = []
+            missing_maintenance = []
+            
+            for hostname_entry in group_data['hostnames']:
+                if isinstance(hostname_entry, dict):
+                    name = hostname_entry.get('name', '')
+                    if 'maintenance' in hostname_entry:
+                        maint = hostname_entry['maintenance']
+                        days = maint.get('days') or ''
+                        start = maint.get('start') or ''
+                        end = maint.get('end') or ''
+                        
+                        # Only show maintenance window if we have actual data
+                        if days or start or end:
+                            maint_str = f" [MW: {days} {start}-{end}]"
+                            hostname_display.append(f"{name}{maint_str}")
+                        else:
+                            hostname_display.append(f"{name} [ NO MW]")
+                            missing_maintenance.append(name)
+                    else:
+                        hostname_display.append(f"{name} [ NO MW]")
+                        missing_maintenance.append(name)
+                else:
+                    hostname_display.append(f"{str(hostname_entry)} [  NO MW]")
+                    missing_maintenance.append(str(hostname_entry))
+            
+            # Track missing maintenance across all groups
+            all_missing_maintenance.extend(missing_maintenance)
+            
+            output.append(f"Hostnames: {', '.join(hostname_display)}")
             
             contacts = group_data.get('contacts', {})
             if contacts:
@@ -339,6 +439,12 @@ def format_results(results):
         for error in results['errors']['file_errors']:
             output.append(f"  - {error}")
     
+    # Add maintenance window information
+    if all_missing_maintenance:
+        output.append(f"\nMaintenance Windows:")
+        output.append(f"   The following {len(all_missing_maintenance)} hostname(s) have no maintenance windows configured:")
+        output.append(f"   {', '.join(all_missing_maintenance)}")
+    
     return '\n'.join(output)
 
 def main():
@@ -347,6 +453,7 @@ def main():
     parser.add_argument('--batch', nargs='+', help='Process multiple ticket files')
     parser.add_argument('--lookup', type=str, help='Look up support group for a hostname')
     parser.add_argument('--contacts', type=str, help='Look up contacts for a support group')
+    parser.add_argument('--maintenance', type=str, help='Look up maintenance window for a hostname')
     parser.add_argument('--clear-cache', action='store_true', help='Clear the cache')
     
     args = parser.parse_args()
@@ -380,6 +487,24 @@ def main():
                 print(f"Notes: {contacts['notes']}")
         else:
             print(f"Support group '{args.contacts}' not found")
+            if 'error' in result:
+                print(f"Error: {result['error']}")
+        return
+    
+    if args.maintenance:
+        result = get_maintenance_window(args.maintenance)
+        if result['found']:
+            print(f"Hostname: {result['hostname']}")
+            maint = result.get('maintenance', {})
+            if maint.get('days'):
+                print(f"Days: {maint['days']}")
+            if maint.get('start'):
+                print(f"Start Time: {maint['start']}")
+            if maint.get('end'):
+                print(f"End Time: {maint['end']}")
+        else:
+            print(f"Hostname: {args.maintenance}")
+            print("No maintenance window configured")
             if 'error' in result:
                 print(f"Error: {result['error']}")
         return

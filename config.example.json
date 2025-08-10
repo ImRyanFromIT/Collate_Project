@@ -7,7 +7,8 @@
   },
   "csv_files": {
     "assets_csv": "assets.csv",
-    "email_distros_csv": "email_distros.csv"
+    "email_distros_csv": "email_distros.csv",
+    "maintenance_windows_file": "maintenance_windows.csv"
   },
   "csv_columns": {
     "assets_csv": {
@@ -19,6 +20,12 @@
       "email_distros_column": 1,
       "individual_contacts_column": 2,
       "notes_column": 3
+    },
+    "maintenance_windows": {
+      "hostname_column": 0,
+      "days_column": 5,
+      "start_time_column": 7,
+      "end_time_column": 8
     }
   },
   "openai": {

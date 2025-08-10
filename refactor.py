@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import json
 import sys
-import os
 import pandas as pd
-from functools import lru_cache
 from datetime import datetime, timedelta
 import argparse
 import glob
@@ -47,7 +45,16 @@ def parse_ticket(ticket_file_path):
     try:
         with open(ticket_file_path, 'r', encoding='utf-8') as f:
             description = f.read()
-        
+
+                    ##############################
+                    #                            #
+                    #                            #
+                    # Remedy/Splunk Ticket Query #
+                    #       goes here            #
+                    #                            #
+                    #                            #
+                    ##############################
+
         if not description.strip():
             return {"hostnames": []}
         

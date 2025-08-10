@@ -10,44 +10,9 @@ import glob
 import re
 
 def load_config():
-    """Load configuration from config.json with validation"""
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        
-        # Validate required configuration sections
-        required_sections = ['csv_files', 'csv_columns', 'cache']
-        for section in required_sections:
-            if section not in config:
-                raise ValueError(f"Missing required configuration section: {section}")
-        
-        # Validate CSV column mappings
-        required_assets_columns = ['hostname_column', 'support_group_column']
-        if 'assets_csv' not in config['csv_columns']:
-            raise ValueError("Missing 'assets_csv' column mappings in config")
-        
-        for col in required_assets_columns:
-            if col not in config['csv_columns']['assets_csv']:
-                raise ValueError(f"Missing column mapping for assets_csv: {col}")
-            if not isinstance(config['csv_columns']['assets_csv'][col], int):
-                raise ValueError(f"Column mapping for assets_csv.{col} must be an integer")
-        
-        required_distros_columns = ['support_group_column', 'email_distros_column', 'individual_contacts_column', 'notes_column']
-        if 'email_distros_csv' not in config['csv_columns']:
-            raise ValueError("Missing 'email_distros_csv' column mappings in config")
-        
-        for col in required_distros_columns:
-            if col not in config['csv_columns']['email_distros_csv']:
-                raise ValueError(f"Missing column mapping for email_distros_csv: {col}")
-            if not isinstance(config['csv_columns']['email_distros_csv'][col], int):
-                raise ValueError(f"Column mapping for email_distros_csv.{col} must be an integer")
-        
-        return config
-        
-    except FileNotFoundError:
-        raise FileNotFoundError("config.json not found. Please ensure the configuration file exists.")
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in config.json: {e}")
+    """Load configuration from config.json"""
+    with open('config.json', 'r') as f:
+        return json.load(f)
 
 CONFIG = load_config()
 

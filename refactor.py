@@ -10,10 +10,40 @@ import glob
 import re
 
 def load_config():
-    """Load configuration from config.json"""
+    """Load configuration from config.json with validation"""
     try:
         with open('config.json', 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+        
+        # Validate required configuration sections
+        required_sections = ['csv_files', 'csv_columns', 'cache']
+        for section in required_sections:
+            if section not in config:
+                raise ValueError(f"Missing required configuration section: {section}")
+        
+        # Validate CSV column mappings
+        required_assets_columns = ['hostname_column', 'support_group_column']
+        if 'assets_csv' not in config['csv_columns']:
+            raise ValueError("Missing 'assets_csv' column mappings in config")
+        
+        for col in required_assets_columns:
+            if col not in config['csv_columns']['assets_csv']:
+                raise ValueError(f"Missing column mapping for assets_csv: {col}")
+            if not isinstance(config['csv_columns']['assets_csv'][col], int):
+                raise ValueError(f"Column mapping for assets_csv.{col} must be an integer")
+        
+        required_distros_columns = ['support_group_column', 'email_distros_column', 'individual_contacts_column', 'notes_column']
+        if 'email_distros_csv' not in config['csv_columns']:
+            raise ValueError("Missing 'email_distros_csv' column mappings in config")
+        
+        for col in required_distros_columns:
+            if col not in config['csv_columns']['email_distros_csv']:
+                raise ValueError(f"Missing column mapping for email_distros_csv: {col}")
+            if not isinstance(config['csv_columns']['email_distros_csv'][col], int):
+                raise ValueError(f"Column mapping for email_distros_csv.{col} must be an integer")
+        
+        return config
+        
     except FileNotFoundError:
         raise FileNotFoundError("config.json not found. Please ensure the configuration file exists.")
     except json.JSONDecodeError as e:
@@ -73,7 +103,7 @@ def parse_ticket(ticket_file_path):
 def get_support_group(hostname, use_cache=True):
     """
     Find support group for a hostname from CSV file.
-    CSV format: hostname (column 1), support_group (column 10)
+    Uses configurable column mappings from config.json
     Returns: {"hostname": str, "support_group": str|None, "found": bool}
     """
     if use_cache and CONFIG['cache']['enabled']:
@@ -83,17 +113,23 @@ def get_support_group(hostname, use_cache=True):
     
     try:
         csv_file_path = CONFIG['csv_files']['assets_csv']
+        hostname_col = CONFIG['csv_columns']['assets_csv']['hostname_column']
+        support_group_col = CONFIG['csv_columns']['assets_csv']['support_group_column']
+        
         df = pd.read_csv(csv_file_path)
         
-        if len(df.columns) < 10:
-            return {"hostname": hostname, "support_group": None, "found": False, "error": "CSV file is not compatible."}
+        # Validate column indices
+        max_col_needed = max(hostname_col, support_group_col)
+        if len(df.columns) <= max_col_needed:
+            return {"hostname": hostname, "support_group": None, "found": False, 
+                   "error": f"CSV file needs at least {max_col_needed + 1} columns, found {len(df.columns)}."}
         
-        # Case-insensitive hostname lookup in column 1
+        # Case-insensitive hostname lookup
         hostname_upper = hostname.strip().upper()
-        hostname_match = df[df.iloc[:, 0].str.strip().str.upper() == hostname_upper]
+        hostname_match = df[df.iloc[:, hostname_col].str.strip().str.upper() == hostname_upper]
         
         if not hostname_match.empty:
-            support_group = hostname_match.iloc[0, 9] if pd.notna(hostname_match.iloc[0, 9]) else None
+            support_group = hostname_match.iloc[0, support_group_col] if pd.notna(hostname_match.iloc[0, support_group_col]) else None
             result = {"hostname": hostname, "support_group": support_group, "found": True}
             
             if CONFIG['cache']['enabled']:
@@ -115,7 +151,7 @@ def get_support_group(hostname, use_cache=True):
 def get_app_owners(support_group, use_cache=True):
     """
     Find app owners for a support group from CSV file.
-    CSV format: Remedy Application Name (column 1), Email Distro (column 2), Individual Contacts (column 3), Notes (column 4)
+    Uses configurable column mappings from config.json
     Returns: {"support_group": str, "contacts": {...}, "found": bool}
     """
     if use_cache and CONFIG['cache']['enabled']:
@@ -125,23 +161,31 @@ def get_app_owners(support_group, use_cache=True):
     
     try:
         csv_file_path = CONFIG['csv_files']['email_distros_csv']
+        support_group_col = CONFIG['csv_columns']['email_distros_csv']['support_group_column']
+        email_distros_col = CONFIG['csv_columns']['email_distros_csv']['email_distros_column']
+        individual_contacts_col = CONFIG['csv_columns']['email_distros_csv']['individual_contacts_column']
+        notes_col = CONFIG['csv_columns']['email_distros_csv']['notes_column']
+        
         df = pd.read_csv(csv_file_path)
         
-        if len(df.columns) < 4:
-            return {"support_group": support_group, "contacts": {}, "found": False, "error": "CSV file is not compatible."}
+        # Validate column indices
+        max_col_needed = max(support_group_col, email_distros_col, individual_contacts_col, notes_col)
+        if len(df.columns) <= max_col_needed:
+            return {"support_group": support_group, "contacts": {}, "found": False, 
+                   "error": f"CSV file needs at least {max_col_needed + 1} columns, found {len(df.columns)}."}
         
-        # Case-insensitive support group lookup in column 1 (optimized)
+        # Case-insensitive support group lookup
         support_group_upper = support_group.strip().upper()
-        group_match = df[df.iloc[:, 0].str.strip().str.upper() == support_group_upper]
+        group_match = df[df.iloc[:, support_group_col].str.strip().str.upper() == support_group_upper]
         
         if not group_match.empty:
             result = {
                 "support_group": support_group,
                 "contacts": {
-                    "app_owner": group_match.iloc[0, 0] if pd.notna(group_match.iloc[0, 0]) else None,
-                    "email_distros": group_match.iloc[0, 1] if pd.notna(group_match.iloc[0, 1]) else None,
-                    "individual_contacts": group_match.iloc[0, 2] if pd.notna(group_match.iloc[0, 2]) else None,
-                    "notes": group_match.iloc[0, 3] if pd.notna(group_match.iloc[0, 3]) else None
+                    "app_owner": group_match.iloc[0, support_group_col] if pd.notna(group_match.iloc[0, support_group_col]) else None,
+                    "email_distros": group_match.iloc[0, email_distros_col] if pd.notna(group_match.iloc[0, email_distros_col]) else None,
+                    "individual_contacts": group_match.iloc[0, individual_contacts_col] if pd.notna(group_match.iloc[0, individual_contacts_col]) else None,
+                    "notes": group_match.iloc[0, notes_col] if pd.notna(group_match.iloc[0, notes_col]) else None
                 },
                 "found": True
             }

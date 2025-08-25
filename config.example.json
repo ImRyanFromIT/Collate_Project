@@ -1,10 +1,5 @@
 {
   "_comment": "Copy this file to config.json and replace the placeholder values with your actual credentials.",
-  "google_sheets": {
-    "support_group_sheet_id": "1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-    "app_owners_sheet_id": "1YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
-    "credentials_file": "path/to/your/service-account-credentials.json"
-  },
   "csv_files": {
     "assets_csv": "assets.csv",
     "email_distros_csv": "email_distros.csv",
